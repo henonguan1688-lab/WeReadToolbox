@@ -3,6 +3,7 @@ import json
 import math
 import os.path
 import re
+import time
 import traceback
 
 import aiohttp
@@ -82,35 +83,19 @@ async def handle_response(response):
             user_data.update(data)
             print("捕获用户数据：", user_data)
         except:
-            pass
+            traceback.print_exc()
 
     if "https://weread.qq.com/web/shelf" in response.url:
         try:
-            open('shelf.html', 'w', encoding='utf8').write(text)
-
             parser_shelf(text)
         except:
-            pass
+            traceback.print_exc()
 
     if 'weread.qq.com/web/shelf/syncBook' in response.url:
         data = await response.json()
         print("请求 URL:", response.url)
         print("数据:", json.dumps(data, ensure_ascii=False))
         print("请求 headers:", response.headers)
-
-
-    # 捕获图片
-    # elif response.request.resource_type == "image":
-    #     url = response.url
-    #     if any(url.lower().endswith(ext) for ext in [".jpg", ".jpeg", ".png"]):
-    #         filename = os.path.join(SAVE_DIR, os.path.basename(url.split("?")[0]))
-    #         try:
-    #             body = await response.body()  # 获取二进制内容
-    #             with open(filename, "wb") as f:
-    #                 f.write(body)
-    #             print("已保存图片:", filename)
-    #         except Exception as e:
-    #             print("保存图片失败:", url, e)
 
 
 async def load_browser():
@@ -164,7 +149,6 @@ async def login_weread():
         text = (await link.text_content() or "").strip()
         if text == "登录":
             print("发现登录按钮")
-            # await link.click()
             login_btn = link
             break
     else:
@@ -195,6 +179,7 @@ async def login_weread():
     # 已登录 → 进入我的书架
     print("检测到已登录，不需要点击登录按钮。打开我的书架。")
 
+
     # 直接进入书架页面
     shelf_resp = await page.goto("https://weread.qq.com/web/shelf")
 
@@ -203,11 +188,23 @@ async def login_weread():
 
     print("已经进入：我的书架")
 
-    # 等待用户
-    while not user_data:
-        await asyncio.sleep(2)
     # 获取所有书籍元素
     # books = await page.query_selector_all("div.shelf_list a.shelfBook")
+
+    '''
+    <div class="wr_avatar navBar_avatar">
+    
+    <img src="https://thirdwx.qlogo.cn/mmopen/vi_32/PiajxSqBRaELQbc5uHoC9GnyIq3q9JeGue2EjEM4wv07PlzFAnYmgcnoDjwfakd5djIlCqvSoicXn21rINZiam04NuO86Aj4TwkfW5vloGjt1nXgTOU30C7IA/46" 
+    
+    class="wr_avatar_img">
+    
+    </div>
+    '''
+
+    while not user_data.get('userVid'):
+        await asyncio.sleep(2)
+        if not user_data.get('userVid'):
+            await page.reload(wait_until="networkidle")
 
     books = []
     offset = 0
@@ -215,10 +212,16 @@ async def login_weread():
     print(f'shelfIndexes size: {len(shelfIndexes)}')
 
     for i in range(1, math.ceil(len(shelfIndexes) / limit) + 1):
+
+        book_ids = [f'{book["bookId"]}' for book in shelfIndexes[offset: offset + limit]]
+
+        if not book_ids:
+            break
+
         # 请求接口
         url = "https://weread.qq.com/web/shelf/syncBook"
         payload = {
-            "bookIds": [f'{book["bookId"]}' for book in shelfIndexes[offset: offset + limit]],
+            "bookIds": book_ids,
             "count": limit,
             "isArchive": None,
             "currentArchiveId": None,
@@ -236,17 +239,23 @@ async def login_weread():
 
         print("请求体：", payload)
 
-        response = await request.post(url, data=json.dumps(payload), headers=headers)
+        while True:
 
-        if response.ok:
-            data = await response.json()
-            books = books + data.get('books', [])
+            response = await request.post(url, data=json.dumps(payload), headers=headers)
 
-            book_titles = [b['title'] for b in data.get('books', [])]
+            if response.ok:
+                data = await response.json()
+                books = books + data.get('books', [])
 
-            print("书籍数据:", json.dumps(book_titles, ensure_ascii=False, ))
-        else:
-            print("请求失败:", response.status)
+                book_titles = [b['title'] for b in data.get('books', [])]
+
+                print("书籍数据:", json.dumps(book_titles, ensure_ascii=False, ))
+
+                if books:
+                    break
+
+            else:
+                print("请求失败:", response.status)
 
     print(f'book shelf size: {len(books)}')
 
