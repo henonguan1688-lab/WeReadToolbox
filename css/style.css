@@ -1,0 +1,31 @@
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+
+
+}
+
+
+img.content-image-class{
+    height: 2em;           /* 图片高度 = 当前行高 */
+    width: auto;           /* 保持宽高比 */
+    vertical-align: middle; /* 与文本中线对齐 */
+    background-color: rgb(239, 239, 239);
+    padding: 2px;
+    border-radius: 5px;
+    margin: 2px;
+}
+
+img.s-pic {
+    height: 1em;           /* 图片高度 = 当前行高 */
+    width: auto;           /* 保持宽高比 */
+    vertical-align: middle; /* 与文本中线对齐 */
+}
+
+.content {
+    color:rgb(215, 110, 110)
+}
