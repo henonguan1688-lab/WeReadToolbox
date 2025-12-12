@@ -15,6 +15,8 @@ from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 
 import requests
 
+from constants import WKHTMLTOPDF_DIR
+
 
 class BuilderThread(QThread):
     msg = Signal(str)
@@ -43,13 +45,27 @@ class BuilderThread(QThread):
         if book_info['format'] == 'txt':
             ext = '.txt'
 
-        for chapter in chapter_infos:
+        for i, chapter in enumerate(chapter_infos):
             cid = chapter['chapterUid']
+
+            fp = book_path / Path(f'chapters/{cid}{ext}')
+
+            if not fp.exists():
+
+                self.send(f'===== skip: {fp}')
+
+                continue
+
+            title = chapter['title'].strip()
+            if not title:
+                title = f'第{i+1}章'
+
+
             self.chapters.append({
-                'title': chapter['title'],
+                'title': title,
                 'cid': chapter['chapterUid'],
-                'level': chapter['level'],
-                'content': open(book_path / Path(f'chapters/{cid}{ext}'), encoding='utf8').read()
+                'level': chapter.get('level', 1),
+                'content': fp.open(encoding='utf8').read()
             })
 
 
@@ -319,13 +335,15 @@ class MarkdownBuilder(BuilderThread):
 
         try:
             for chapter in self.chapters:
-                html = chapter['content']
-                mk = self.xhtml_to_markdown(html)
+                content = chapter['content']
+                if self.format == 'epub':
+                    content = self.xhtml_to_markdown(content)
+
                 title = chapter['title']
                 self.send(f'转换-章节：{title}')
 
                 chapter.update({
-                    'content': mk
+                    'content': content
                 })
 
             self.output()
@@ -342,12 +360,14 @@ class MarkdownBuilder(BuilderThread):
             with open(self.file_name, 'w', encoding='utf8') as fp:
                 fp.write(css_temp)
                 for chapter in self.chapters:
+                    if self.format == 'txt':
+                        title = '# ' + chapter['title']
+                        # level = max(1, int(chapter.get('level', '0')))
+                        # title_level = ''.join(['#' for i in range(level)]) + ' ' + chapter['title'].strip()
+                        fp.write(f"{title}\n\n{chapter['content']}\n\n")
+                    else:
+                        fp.write(f"{chapter['content']}\n\n")
 
-                    level = max(1, int(chapter.get('level', '0')))
-
-                    title_level = ''.join(['#' for i in range(level)]) + ' ' + chapter['title'].strip()
-
-                    fp.write(f"{title_level}\n\n{chapter['content']}\n\n")
             css_path = self.book_path / Path("css")
             css_path.mkdir(exist_ok=True, parents=True)
             shutil.copyfile("css/style.less", self.book_path / Path("css/style.less"))
@@ -450,10 +470,27 @@ class PdfBuilder(BuilderThread):
         import warnings
 
         warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
-
+        # 定义要统一添加的 CSS 链接
+        UNIFIED_CSS_LINK = f'<link href="style.css" rel="stylesheet" type="text/css" />'
         for chapter in self.chapters:
             html = chapter['content']
             soup = BeautifulSoup(html, "lxml")
+
+            # for link in soup.find_all("link", rel="stylesheet"):
+            #     link.decompose()
+            #
+            # head = soup.find('head')
+            # new_link_soup = BeautifulSoup(UNIFIED_CSS_LINK, "html.parser")
+            # new_link_tag = new_link_soup.find('link')
+            #
+            # if head:
+            #     head.append(new_link_tag)
+            # else:
+            #     first_tag = soup.find()
+            #     if first_tag:
+            #         first_tag.insert_before(new_link_tag)
+            #     else:
+            #         soup.insert(0, new_link_tag)
 
             # 下载并替换图片资源
             for img in soup.find_all("img"):
@@ -463,7 +500,7 @@ class PdfBuilder(BuilderThread):
 
                 if src.startswith('../'):
                     self.send(f'sikp download: {src}')
-                    img["src"] = src.replace('../Images/note.png', 'note.png')
+                    img["src"] = src.replace('../Images/note.png', f'note.png')
                 else:
 
                     ext = os.path.splitext(src)[1].lower().replace('.', '')
@@ -480,7 +517,20 @@ class PdfBuilder(BuilderThread):
 
                     self.download_image(src, img_path=img_file_path)
 
-            fixed_html = soup.prettify()
+            # 查找 body 标签
+            body_tag = soup.find('body')
+
+            if body_tag:
+                # 只提取 body 标签内部的内容
+                # .decode_contents() 返回 body 标签内所有元素的字符串形式，不包含 body 标签本身。
+                fixed_html = body_tag.decode_contents()
+            else:
+                # 如果文档片段中没有 body 标签，则返回整个 prettify() 后的内容，
+                # 或者根据您的需求，返回 soup 的 prettify() 结果。
+                # 如果您确认输入始终是完整的 HTML 文档，则不会进入此分支。
+                # 如果是片段，这里可以返回整个 soup.prettify() 的结果，或者其他处理。
+                fixed_html = soup.prettify()
+
             chapter['content'] = fixed_html
 
         self.output()
@@ -494,8 +544,11 @@ class PdfBuilder(BuilderThread):
         self.send("正在合并 HTML...")
         contents = [c['content'] for c in self.chapters]
         merged_html = (
-                "<html><head><meta charset='utf-8'></head><body>"
-                + "<div style='page-break-after: always'></div>".join(contents)
+                "<html><head><meta charset='utf-8'>"
+                + "<link rel='stylesheet' href='style.css'/>"
+                + "</head><body>"
+                + contents[0]
+                + "<div style='page-break-after: always'></div>".join(contents[1:])
                 + "</body></html>"
         )
 
@@ -507,21 +560,32 @@ class PdfBuilder(BuilderThread):
         system = platform.system()
 
         shutil.copyfile('images/note.png', self.book_path / 'note.png')
-        shutil.copyfile('css/style.less', self.book_path / 'style.css')
+        shutil.copyfile('css/style.css', self.book_path / 'style.css')
         self.send(f"正在复制资源： {self.book_path}/note.png")
 
         if system == "Windows":
             merged_file = self.book_path / "merged.html"
             merged_file.write_text(merged_html, "utf-8")
 
-            WKHTML_PATH = r"lib/wkhtmltox/bin/wkhtmltopdf.exe"
+            # 定义 PDF 格式和全局样式选项
+            pdf_options = [
+                "--enable-local-file-access",  # 允许读取本地图片 (保持)
+                "--page-size", "A4",  # 纸张大小 A4
+                "--margin-top", "20mm",  # 顶部边距 20mm
+                "--margin-bottom", "20mm",  # 底部边距 20mm
+                "--margin-left", "15mm",  # 左边距 15mm
+                "--margin-right", "15mm",  # 右边距 15mm
+                "--encoding", "utf-8",  # 确保输入编码正确
+                # "--dpi", "300",             # 可选：提高图像分辨率
+            ]
 
-            if not os.path.exists(WKHTML_PATH):
-                raise f'not found: {WKHTML_PATH}'
+
+            if not os.path.exists(WKHTMLTOPDF_DIR):
+                raise f'not found: {WKHTMLTOPDF_DIR}'
 
             cmd = [
-                WKHTML_PATH,
-                "--enable-local-file-access",  # 允许读取本地图片
+                WKHTMLTOPDF_DIR,
+                *pdf_options,  # 允许读取本地图片
                 str(merged_file),
                 str(self.file_name)
             ]

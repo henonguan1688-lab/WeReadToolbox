@@ -11,11 +11,10 @@ from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright
 
 from book_util import WereadGenerate
+from constants import BOOK_SHELF_PATH, STORAGE, COVER_DIR, CHROME_DIR
 
-STORAGE = "weread_state.json"
-
-if not os.path.exists(STORAGE):
-    raise 'weread_state.json can found。'
+# if not os.path.exists(STORAGE):
+#     raise 'weread_state.json can found。'
 
 # BASE_HEADERS_KEYS = ['sec-ch-ua-platform', 'referer', 'sec-ch-ua', 'sec-ch-ua-mobile', 'user-agent']
 
@@ -23,8 +22,6 @@ user_data = {}
 shelfIndexes = []
 
 
-SAVE_DIR = "images/cover"
-os.makedirs(SAVE_DIR, exist_ok=True)
 
 async def download_image(url, filename):
     try:
@@ -102,12 +99,28 @@ async def load_browser():
 
     p = await async_playwright().start()  # 不使用 async with
 
-    browser = await p.chromium.launch(headless=False, )  # 可改 True
+    browser = await p.chromium.launch(headless=False, executable_path=CHROME_DIR)  # 可改 True
 
     # 如果已经有会话文件，加载它
     try:
         context = await browser.new_context(storage_state=STORAGE, )
         print("加载已有会话:", STORAGE)
+    except Exception:
+        traceback.print_exc()
+        context = await browser.new_context()
+        print("创建新会话")
+
+    return p, browser, context
+
+async def load_search_browser():
+
+    p = await async_playwright().start()  # 不使用 async with
+
+    browser = await p.chromium.launch(headless=True, executable_path=CHROME_DIR)  # 可改 True
+
+    # 如果已经有会话文件，加载它
+    try:
+        context = await browser.new_context()
     except Exception:
         traceback.print_exc()
         context = await browser.new_context()
@@ -273,12 +286,12 @@ async def login_weread():
         if ext.lower() not in [".jpg", ".jpeg", ".png"]:
             ext = ".jpg"  # 默认 jpg
 
-        filename = os.path.join(SAVE_DIR, f'{book["bookHash"]}{ext}')
+        filename = os.path.join(COVER_DIR, f'{book["bookHash"]}{ext}')
         if not os.path.exists(filename):
             tasks.append(download_image(img_url, filename))
 
     if books:
-        open('books.json', 'w', encoding='utf8').write(json.dumps(books, ensure_ascii=False, indent=4))
+        open(BOOK_SHELF_PATH, 'w', encoding='utf8').write(json.dumps(books, ensure_ascii=False, indent=4))
 
     if tasks:
         await asyncio.gather(*tasks)
@@ -289,7 +302,11 @@ async def login_weread():
     await browser.close()
     await p.stop()
 
-    return user_data
+    if user_data:
+        open('user_info.json', 'w', encoding='utf8')\
+            .write(json.dumps(user_data, ensure_ascii=False, indent=4))
+
+    return user_data, books
 
 if __name__ == '__main__':
 
