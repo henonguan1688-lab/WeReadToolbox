@@ -1,3 +1,11 @@
+# 最新下载
+
+微信读书工具箱-测试版-1.1.0-alpha.zip 
+
+日期：2025-12-17
+
+链接: https://pan.baidu.com/s/1f4PrYymX_UJ0gROxWYXfUA?pwd=jiue 提取码: jiue
+
 # 技术
 
 基于pyside6、playwright，调用weread 接口解码数据
