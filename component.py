@@ -29,7 +29,7 @@ from text_to_epub import EpubBuilder, MarkdownBuilder, PdfBuilder
 from book_util import set_book_is_download, req_book_page, req_book_chapters, parser_script, parser_chapter_info, \
     req_book_chapters_content, resolve_content, load_my_books, req_goto_search_page, req_search_books
 from shelf import login_weread, load_browser, load_search_browser
-from constants import DOWNLOAD_DELAY, BOOK_DIR
+from constants import DOWNLOAD_DELAY, BOOK_DIR, STORAGE
 
 
 class ExportDialog(QDialog):
@@ -336,6 +336,7 @@ class LoginAsyncWorker(QThread):
             self.books_signal.emit(books)
 
         except Exception as e:
+            traceback.print_exc()
             print(f"异步任务执行失败: {e}")
             # 可以在这里发射一个带有错误信息的信号
 
@@ -441,7 +442,7 @@ class AsyncDownloadWorker(QThread):
 
                             if content:
                                 chapter_path.open('w', encoding='utf8').write(content)
-                                print(f'保存章节：{chapter_path}')
+                                # print(f'保存章节：{chapter_path}')
 
                         success = 1 if (i + 1) == total else 0
                         self.progress.emit(success, '', min(i + 1, total), total, book)
@@ -456,8 +457,9 @@ class AsyncDownloadWorker(QThread):
                     self.progress.emit(-1, f'{e}', curr_index + 1, total, book)
                     traceback.print_exc()
                 finally:
+                    # 保存会话到文件
+                    await context.storage_state(path=STORAGE)
                     await page.close()
-                #     await b.close()
 
     def run(self):
 
@@ -595,40 +597,46 @@ class DataLoadWorker(QThread):
     def run(self):
         """模拟一个耗时的数据加载任务"""
         print("Worker: 正在开始加载数据...")
+
         set_book_is_download(self.books)
         print("Worker: 数据加载完成。")
 
 
-# --- 2. 主应用程序类 (管理 UI 和线程) ---
 class DataLoadWindow(QWidget):
 
     loaded_signal = Signal(bool)
 
-    def __init__(self, books):
+    def __init__(self, is_init=True):
         super().__init__()
-        self.books = books
+        self.books = []
         self.resize(250, 100)
         self.setWindowTitle("数据加载中")
 
-        layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("正在等待数据加载..."))
+        self.layout = QVBoxLayout(self)
+        self.layout.addWidget(QLabel("正在等待数据加载..."))
 
         bar = QProgressBar()
         bar.setValue(0)
         bar.setMaximum(0)
         bar.setVisible(True)
 
-        layout.addWidget(bar)
+        self.layout.addWidget(bar)
 
-
-        self.init_async()
         self.show()
+        # asyncio.run(login_weread())  # 如果需要
+        if is_init:
+            self.login_worker = LoginAsyncWorker()
+            self.login_worker.books_signal.connect(self.init_async)
+            self.login_worker.start()
+        else:
+            self.init_async(self.books)
 
 
-    def init_async(self):
+    def init_async(self, books):
         """
         开始异步任务，并显示加载弹框。
         """
+        self.books = books
         self.worker = DataLoadWorker(self.books)
         # 链接工作线程的完成信号到主线程的槽函数
         self.worker.finished.connect(self.on_data_load_finished)
@@ -646,6 +654,39 @@ class DataLoadWindow(QWidget):
 
         self.loaded_signal.emit(True)
 
+
+class ClickableLabel(QLabel):
+
+    clicked = Signal()  # 自定义点击信号
+
+    def __init__(self, tip_text='', parent=None, ):
+        super().__init__(parent)
+        self.tip_text = tip_text
+
+        # 初始样式：没有边框
+        self.setStyleSheet("border: 1px solid transparent;")
+        # 鼠标悬停才会触发 enterEvent / leaveEvent
+        self.setMouseTracking(True)
+
+        # 设置提示文字（Qt 会自动在 hover 时显示）
+        self.setToolTip(self.tip_text)
+
+    # 点击事件
+    def mousePressEvent(self, event):
+        self.clicked.emit()
+        super().mousePressEvent(event)
+
+    # 鼠标进入事件
+    def enterEvent(self, event):
+        # 高亮边框，比如蓝色
+        self.setStyleSheet("border: 1px solid gray;")
+        super().enterEvent(event)
+
+    # 鼠标离开事件
+    def leaveEvent(self, event):
+        # 恢复原始样式
+        self.setStyleSheet("border: 1px solid transparent;")
+        super().leaveEvent(event)
 
 
 # 假设这些是外部定义的函数或方法，您需要在实际环境中提供它们的实现

@@ -320,7 +320,7 @@ async def req_book_chapters_content(page, book, chapter_id, psvts, pclts):
         "accept": "application/json, text/plain, */*"
     }
 
-    print("请求体：", payload)
+    # print("请求体：", payload)
     texts = []
     for url in urls:
         retry = 0

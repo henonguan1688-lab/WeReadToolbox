@@ -1,12 +1,14 @@
 import asyncio
 import json
 import os.path
+import shutil
 import sys
 import webbrowser
+from pathlib import Path
 
 import requests
-from PySide6.QtCore import Qt, Slot, Signal, QTimer
-from PySide6.QtGui import QPixmap, QAction, QFont
+from PySide6.QtCore import Qt, Slot, Signal, QTimer, QSize, QObject, QThread, QThreadPool, QRunnable
+from PySide6.QtGui import QPixmap, QAction, QFont, QPainter, QColor, QIcon
 from PySide6.QtNetwork import QNetworkAccessManager
 from PySide6.QtWidgets import (
     QApplication, QWidget, QLabel, QListWidget, QListWidgetItem,
@@ -16,9 +18,10 @@ from PySide6.QtWidgets import (
 
 from book_util import WereadGenerate, load_my_books, load_local_books, set_book_is_download, load_fav_books
 from component import ExportDialog, BookItemWidget, DataLoadWindow, LoginAsyncWorker, AsyncDownloadWorker, \
-    AsyncSearchWorker, ImageDownloader, ToastNotification
-from constants import COVER_DIR, LOCAL_BOOK_SHELF_PATH, FAV_BOOK_SHELF_PATH
+    AsyncSearchWorker, ImageDownloader, ToastNotification, ClickableLabel
+from constants import COVER_DIR, LOCAL_BOOK_SHELF_PATH, FAV_BOOK_SHELF_PATH, BOOK_DIR
 from shelf import login_weread, load_browser, load_search_browser
+from button_component import BootstrapButton
 
 
 def load_image(cover=None, book=None, size=(40, 60)):
@@ -46,6 +49,64 @@ def load_image(cover=None, book=None, size=(40, 60)):
         return pix.scaled(*size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
     except:
         return QPixmap()
+
+def create_custom_icon(text: str, size: int = 24, color: str = "#2D8CF0", btn: QPushButton=None) -> QIcon:
+    """
+    创建自定义文字图标（如下载箭头 ↓、对勾 ✓、加号 + 等）
+
+    Args:
+        text: 要显示的文字/符号
+        size: 图标尺寸（正方形）
+        color: 图标颜色（支持十六进制格式）
+
+    Returns:
+        QIcon: 生成的自定义图标
+    """
+    # 创建透明画布
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+
+    # 绘制文字
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)  # 抗锯齿
+    painter.setPen(QColor(color))  # 设置图标颜色
+
+    # 设置字体
+    font = QFont()
+    font.setPointSize(size // 2)  # 文字大小为图标尺寸的一半
+    font.setBold(True)  # 加粗文字，让符号更清晰
+    painter.setFont(font)
+
+    # 居中绘制文字
+    painter.drawText(pixmap.rect(), Qt.AlignCenter, text)
+    painter.end()
+
+    if btn:
+        # 设置按钮样式（内边框为0）
+        btn_style = """
+        QPushButton {
+            /* 设置内边距为0 */
+            padding: 0px;
+            /* 可选：设置边框宽度为0，完全移除边框 */
+            border: none;
+            /* 设置按钮最小尺寸，保证按钮不会太小 */
+            min-height: 30px;
+            min-width: 40px;
+            /* 设置按钮样式 */
+            border-radius: 4px;
+            background-color: #f0f0f0;
+        }
+        QPushButton:hover {
+            background-color: #e0e0e0;
+        }
+        QPushButton:pressed {
+            background-color: #d0d0d0;
+        }
+        """
+
+        btn.setStyleSheet(btn_style)
+
+    return QIcon(pixmap)
 
 
 class SearchPageWidget(QWidget):
@@ -81,7 +142,7 @@ class SearchPageWidget(QWidget):
         self.search_input.setPlaceholderText("请输入书名、作者或 ID...")
         self.search_input.setObjectName("search_input")  # 设置对象名方便样式或查找
 
-        self.search_btn = QPushButton("搜索")
+        self.search_btn = BootstrapButton("搜索")
         self.search_btn.setObjectName("search_button")
 
         search_box.addWidget(self.search_input)
@@ -215,7 +276,7 @@ class SearchPageWidget(QWidget):
 
             self.update_ui_for_results(self.current_count < self.scope_count)
 
-        if not results:
+        if not books:
             self.search_results_list.clear()
             self.search_results_list.addItem("未找到匹配的书籍。")
         else:
@@ -284,21 +345,21 @@ class SearchPageWidget(QWidget):
                 item_layout.addWidget(info_widget)
                 item_layout.addStretch()  # 推开右侧部件
 
-                # --- C. 操作按钮 (例如：下载或查看详情) ---
-                # 打开按钮
-                open_btn = QPushButton("打开")
+                fav_button = BootstrapButton("收藏本地")
+                # 假设连接到一个处理搜索结果下载的槽函数
+                fav_button.clicked.connect(lambda checked, book=book_info, btn=fav_button: self.on_fav_click(book, btn))
+                fav_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+
+                 # 打开按钮
+                open_btn = BootstrapButton("打开")
                 open_btn.clicked.connect(
                     lambda checked, bid=book_info["bookHash"]:
                         webbrowser.open("https://weread.qq.com/web/reader/" + bid)
                 )
 
-                fav_button = QPushButton("收藏本地")
-                # 假设连接到一个处理搜索结果下载的槽函数
-                fav_button.clicked.connect(lambda checked, book=book_info, btn=fav_button: self.on_fav_click(book, btn))
-                fav_button.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
-                item_layout.addWidget(open_btn)
                 item_layout.addWidget(fav_button)
+                item_layout.addWidget(open_btn)
 
                 # 5. 关键步骤：设置 QListWidgetItem 的大小
                 list_item.setSizeHint(item_widget.sizeHint())
@@ -309,125 +370,153 @@ class SearchPageWidget(QWidget):
                 print(f"{book_info['title']} - {book_info['author']}")
                 # self.search_results_list.addItem(item)
 
-    def on_fav_click(self, book, btn):
+    def on_fav_click(self, book, btn: "BootstrapButton"):
         self.favorite_signal.emit(book)
 
         btn.setEnabled(False)
-        btn.setText('⭐ 已收藏')
-        btn.setStyleSheet('''
-            QPushButton {
-                background-color: #4CAF50;
-                color: white;
-                border: none;
-                border-radius: 8px;
-                padding: 6px 12px;
-                font-size: 15px;
-            }
-            QPushButton:disabled {
-                background-color: #8BC34A;
-                color: #EEEEEE;
-            }
-        ''')
+        btn.setText('')
+        btn.toggle_icon('icons/star.svg', 'warning')
+        # btn.setStyleSheet('''
+        #     QPushButton {
+        #         background-color: transparent;
+        #         color: #ffc107;
+        #
+        #     }
+        #     QPushButton:disabled {
+        #         background-color: transparent;
+        #         color: #ffc107;
+        #     }
+        # ''')
 
+
+# ---- 封面异步加载线程 ----
+
+class ImageLoadTask(QRunnable):
+    def __init__(self, book, size, callback):
+        super().__init__()
+        self.book = book
+        self.size = size
+        self.callback = callback
+
+    def run(self):
+        pix = load_image(self.book.get('cover', ''), size=self.size)
+        # 这里通过回调在主线程更新
+        self.callback(pix, self.book)
+
+
+
+# ---- 书架 Widget ----
 class BookshelfPageWidget(QWidget):
-    """
-    负责显示用户的书架列表内容的独立 QWidget (对应导航 Index 0)。
-    """
-    # ⚠️ 可以定义信号，例如用于在点击下载按钮时通知主窗口
     download_requested = Signal(dict)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, weread=None):
         super().__init__(parent)
+        self.weread = weread
         self._setup_ui()
         self._setup_connections()
 
-        books = load_my_books()
+        self.book_list = load_my_books()
+        self.is_init = False
 
-        self.book_list = books
+        self.batch_size = 20  # 每次加载数量
+        self.loaded_count = 0  # 已加载数量
+        self.pixmap_cache = {}  # 封面缓存，避免重复加载
 
-        self.update_books(books)
+        self.thread_pool = QThreadPool.globalInstance()
+        self.thread_pool.setMaxThreadCount(5)  # 同时最多 5 个线程
 
     def _setup_ui(self):
-        """初始化书架页面的所有 UI 元素和布局"""
-
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(10, 10, 10, 10)
-
-        # 页面标题
-        # 注意：这里使用 H4 标签是为了保持和您原代码一致，实际 Qt UI 中推荐使用样式
         main_layout.addWidget(QLabel("<h4>微信书架</h4><hr>"))
 
-        # --- 书籍列表 QListWidget ---
         self.book_list_widget = QListWidget()
-        self.book_list_widget.setSelectionMode(QAbstractItemView.NoSelection)
-        self.book_list_widget.setObjectName("book_list_widget")  # 方便调试或样式定制
-
+        self.book_list_widget.setSelectionMode(QListWidget.NoSelection)
         main_layout.addWidget(self.book_list_widget)
 
+        self.book_list_widget.verticalScrollBar().valueChanged.connect(self._on_scroll)
+
     def _setup_connections(self):
-        """设置信号连接"""
-        # (如果您的 QListWidget 是标准项，这里可以连接 itemClicked 等)
-        pass
+        self.weread.bookshelf_signal.connect(self._init)
 
-    @Slot(list)
-    def update_books(self, book_list):
-        """
-        供外部（如 WeReadWindow）调用，用于清空并重新填充书架列表。
-        """
+    def _init(self):
+        if not self.is_init:
+            self.book_list_widget.clear()
+            self.loaded_count = 0
+            self._load_next_batch()
+            self.is_init = True
+
+    def update_books(self, books):
+        self.book_list = books
         self.book_list_widget.clear()
+        self.loaded_count = 0
+        self._load_next_batch()
 
-        if not book_list:
-            self.book_list_widget.addItem("书架为空，请尝试刷新。")
+    def _on_scroll(self, value):
+        scroll_bar = self.book_list_widget.verticalScrollBar()
+        if value >= scroll_bar.maximum() - 10:  # 快到底部时加载下一批
+            self._load_next_batch()
+
+    def _load_next_batch(self):
+        if self.loaded_count >= len(self.book_list):
             return
 
-        self.book_list_widget.addItem(f"总计找到 {len(book_list)} 本书籍。")
-
-        for book in book_list:
+        next_batch = self.book_list[self.loaded_count:self.loaded_count + self.batch_size]
+        for book in next_batch:
             self._add_book_item(book)
+        self.loaded_count += len(next_batch)
 
     def _add_book_item(self, book):
-        """
-        创建并添加一个自定义的 QListWidgetItem 来显示书籍信息。
-        """
         item = QListWidgetItem(self.book_list_widget)
         item_widget = QWidget()
+        layout = QHBoxLayout(item_widget)
+        layout.setContentsMargins(5, 5, 5, 5)
 
-        # 使用 QHBoxLayout 实现横向布局：封面 | 标题/作者 | 动作按钮
-        item_layout = QHBoxLayout(item_widget)
-        item_layout.setContentsMargins(5, 5, 5, 5)
-
-        # --- 封面 ---
-        cover = load_image(book.get('cover', ''), size=(40, 60))
+        # --- 封面占位 ---
         cover_label = QLabel()
-        cover_label.setPixmap(cover)
-        item_layout.addWidget(cover_label)
+        cover_label.setFixedSize(40, 60)
+        cover_label.setPixmap(QPixmap(40, 60))  # 占位空图
+        layout.addWidget(cover_label)
 
-        # --- 信息 ---
+        # --- 书籍信息 ---
         title = book.get('title', '未知书籍')
+        if len(title) > 20:
+            title = title[:20] + "…"
         author = book.get('author', '未知作者')
         info_label = QLabel(f"<b>{title}</b><br>作者: {author}")
-        item_layout.addWidget(info_label)
-        item_layout.addStretch()  # 推开右侧部件
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label, 10)
+        layout.addStretch()
 
-        # --- 动作按钮 ---
-        action_btn = QPushButton("下载本地")
-        # ⚠️ 连接到局部槽函数，将书籍数据作为参数传递
-        action_btn.clicked.connect(lambda checked, b=book: self._handle_download_click(b))
-        action_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        item_layout.addWidget(action_btn)
+        # --- 下载按钮 ---
+        btn = BootstrapButton("下载本地")
+        btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        btn.clicked.connect(lambda checked, b=book: self._handle_download_click(b))
+        layout.addWidget(btn)
 
-        # 绑定和设置大小
         item.setSizeHint(item_widget.sizeHint())
         self.book_list_widget.setItemWidget(item, item_widget)
 
+        # --- 异步加载封面 ---
+        if book.get('cover'):
+            if book['cover'] in self.pixmap_cache:
+                cover_label.setPixmap(self.pixmap_cache[book['cover']])
+            else:
+                task = ImageLoadTask(book, (40, 60),
+                                     lambda pix, b: self._on_image_loaded(pix, b, cover_label))
+                self.thread_pool.start(task)
+
+    @Slot(QPixmap, object, QLabel)
+    def _on_image_loaded(self, pixmap, book, label):
+        if pixmap and not pixmap.isNull():
+            print(f'{book["title"]} - {book["cover"]}')
+            label.setPixmap(pixmap)
+            self.pixmap_cache[book['cover']] = pixmap
 
     @Slot(dict)
     def _handle_download_click(self, book):
-        """处理下载按钮点击，并通知主窗口"""
-        print(f"用户请求下载书籍: {book.get('title')}")
-        # 向上发射信号，让主窗口处理实际的下载逻辑
+        print(f"下载书籍: {book.get('title')}")
         self.download_requested.emit(book)
-
 
 class FavoriteBookPageWidget(QWidget):
     """
@@ -436,21 +525,27 @@ class FavoriteBookPageWidget(QWidget):
     # ⚠️ 可以定义信号，例如用于在点击下载按钮时通知主窗口
     download_requested = Signal(dict)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, weread=None):
         super().__init__(parent)
         self._setup_ui()
-        self._setup_connections()
+        self.weread = weread
+        self.is_init = False
 
         books = load_fav_books()
 
         self.book_list = books
 
         self.book_ids = set()
+        self._setup_connections()
 
-        self.update_books(books)
+        # self.update_books(books)
 
         self.toast = ToastNotification("", self)
         self.toast.hide()  # 默认隐藏
+
+        self.pixmap_cache = {}
+        self.thread_pool = QThreadPool.globalInstance()
+        self.thread_pool.setMaxThreadCount(5)  # 同时最多 5 个线程
 
     def _setup_ui(self):
         """初始化书架页面的所有 UI 元素和布局"""
@@ -471,8 +566,13 @@ class FavoriteBookPageWidget(QWidget):
 
     def _setup_connections(self):
         """设置信号连接"""
-        # (如果您的 QListWidget 是标准项，这里可以连接 itemClicked 等)
-        pass
+        self.weread.fav_signal.connect(self._init)
+
+    def _init(self):
+        if not self.is_init:
+            self.update_books(self.book_list)
+
+            self.is_init = True
 
     @Slot(list)
     def update_books(self, book_list):
@@ -502,10 +602,10 @@ class FavoriteBookPageWidget(QWidget):
         item_layout = QHBoxLayout(item_widget)
         item_layout.setContentsMargins(5, 5, 5, 5)
 
-        # --- 封面 ---
-        cover = load_image(book.get('cover', ''), size=(40, 60))
+        # --- 封面占位 ---
         cover_label = QLabel()
-        cover_label.setPixmap(cover)
+        cover_label.setFixedSize(40, 60)
+        cover_label.setPixmap(QPixmap(40, 60))  # 占位空图
         item_layout.addWidget(cover_label)
 
         # --- 信息 ---
@@ -516,8 +616,19 @@ class FavoriteBookPageWidget(QWidget):
         item_layout.addStretch()  # 推开右侧部件
 
         # --- 动作按钮 ---
-        action_btn = QPushButton("加入下载")
-        # ⚠️ 连接到局部槽函数，将书籍数据作为参数传递
+        open_btn = BootstrapButton("web", )
+        open_btn.clicked.connect(lambda c, b=book:
+                                 webbrowser.open(f"https://weread.qq.com/web/reader/{book['bookHash']}"))
+        item_layout.addWidget(open_btn)
+
+
+        # --- 动作按钮 ---
+        del_btn = BootstrapButton("移出收藏", variant='secondary')
+        del_btn.clicked.connect(lambda c, b=book, i=item: self.del_book(b, i))
+        item_layout.addWidget(del_btn)
+
+
+        action_btn = BootstrapButton("下载")
         action_btn.clicked.connect(lambda checked, b=book, btn=action_btn: self._handle_download_click(b, btn))
         action_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         item_layout.addWidget(action_btn)
@@ -526,6 +637,78 @@ class FavoriteBookPageWidget(QWidget):
         item.setSizeHint(item_widget.sizeHint())
         self.book_list_widget.setItemWidget(item, item_widget)
 
+        # --- 异步加载封面 ---
+        if book.get('cover'):
+            if book['cover'] in self.pixmap_cache:
+                cover_label.setPixmap(self.pixmap_cache[book['cover']])
+            else:
+                task = ImageLoadTask(book, (40, 60),
+                                     lambda pix, b: self._on_image_loaded(pix, b, cover_label))
+                self.thread_pool.start(task)
+
+    @Slot(QPixmap, object, QLabel)
+    def _on_image_loaded(self, pixmap, book, label):
+        if pixmap and not pixmap.isNull():
+            print(f'{book["title"]} - {book["cover"]}')
+            label.setPixmap(pixmap)
+            self.pixmap_cache[book['cover']] = pixmap
+
+
+    def del_book(self, book, item):
+        book_id = book['bookId']
+
+        self.book_list = [b for b in self.book_list if book_id != b['bookId']]
+
+        # self.update_books(self.book_list)
+        # self.book_ids.clear()
+
+        """
+        删除指定书籍项
+        :param book: 书籍字典（含bookId）
+        :param item: 要删除的QListWidgetItem（可选，优先使用）
+        """
+
+        # 1. 如果直接传了item，直接删除
+        if item:
+            # 找到item的行号并删除
+            row = self.book_list_widget.row(item)
+            if row >= 0:
+                self.book_list_widget.takeItem(row)
+        else:
+            # 2. 未传item时，根据bookId遍历查找并删除
+            for row in range(self.book_list_widget.count()):
+                current_item = self.book_list_widget.item(row)
+                # 跳过统计项和空提示项
+                if current_item.text() in [f"总计找到 {len(self.book_ids)} 本书籍。", "书架为空，请尝试刷新。"]:
+                    continue
+                # 获取绑定的bookId
+                current_book_id = current_item.data(0)
+                if current_book_id == book_id:
+                    self.book_list_widget.takeItem(row)
+                    break
+
+        # 3. 清理book_ids缓存
+        if book_id in self.book_ids:
+            self.book_ids.remove(book_id)
+        # 4. 更新统计项（重新生成统计文本）
+        self._update_book_count()
+
+        open(FAV_BOOK_SHELF_PATH, 'w', encoding='utf8').write(json.dumps(self.book_list, indent=4, ensure_ascii=False))
+
+    def _update_book_count(self):
+        """更新书架顶部的统计项"""
+        # 先删除原统计项（第一行）
+        if self.book_list_widget.count() > 0:
+            first_item = self.book_list_widget.item(0)
+            if first_item and "总计找到" in first_item.text():
+                self.book_list_widget.takeItem(0)
+
+        # 重新添加统计项
+        book_count = len(self.book_ids)
+        if book_count == 0:
+            self.book_list_widget.insertItem(0, "书架为空，请尝试刷新。")
+        else:
+            self.book_list_widget.insertItem(0, f"总计找到 {book_count} 本书籍。")
 
     @Slot(dict)
     def _handle_download_click(self, book, download_btn: "QPushButton"):
@@ -570,13 +753,13 @@ class DownloadPageWidget(QWidget):
     负责显示当前下载任务列表和进度的独立 QWidget。
     """
 
-    def __init__(self, parent=None, ):
+    def __init__(self, parent=None, weread=None):
         super().__init__(parent)
         self.tasks = {}
         self.book_ids = set()
-        self.books = load_local_books()
-
-        set_book_is_download(self.books)
+        self.books = []
+        self.weread = weread
+        self.is_init = False
 
         self.item_layout_list = {}
 
@@ -589,11 +772,22 @@ class DownloadPageWidget(QWidget):
         self.toast = ToastNotification("", self)
         self.toast.hide()  # 默认隐藏
 
-        self._setup_ui()
+        # self._setup_ui()
+        self.books = load_local_books()
+
+        for b in self.books:
+            self.book_ids.add(b['bookId'])
+
+        self.pixmap_cache = {}
+        self.thread_pool = QThreadPool.globalInstance()
+        self.thread_pool.setMaxThreadCount(5)  # 同时最多 5 个线程
 
     def _setup_ui(self):
+
+        set_book_is_download(self.books)
+
         main_layout = QVBoxLayout(self)
-        main_layout.addWidget(QLabel("<h2>下载列表</h2><hr>"))
+        main_layout.addWidget(QLabel("<h4>下载列表</h4><hr>"))
 
         # 任务列表
         self.list_widget = QListWidget()
@@ -616,6 +810,13 @@ class DownloadPageWidget(QWidget):
         # self.worker.status.connect()
         self.worker.show_progress.connect(self._update_bar_value)
         self.worker.update_book_signal.connect(self.update_books)
+        self.weread.download_signal.connect(self._init)
+
+    def _init(self):
+        if not self.is_init:
+            self._setup_ui()
+
+            self.is_init = True
 
     def _update_bar_value(self, value, book):
         book_id = book['bookId']
@@ -632,9 +833,12 @@ class DownloadPageWidget(QWidget):
         bar.setVisible(True)
         bar.setRange(start, value)
 
-        pause_btn: "QPushButton" = obj['pause_btn']
+        pause_btn: "BootstrapButton" = obj['pause_btn']
         pause_btn.setEnabled(True)
-        pause_btn.setText('暂停')
+        pause_btn.toggle_icon('icons/pause.svg')
+
+        del_btn: "BootstrapButton" = obj['del_btn']
+        del_btn.setEnabled(False)
 
     @Slot(str, int, int)
     def update_task_progress(self, task_id, current, total):
@@ -652,6 +856,8 @@ class DownloadPageWidget(QWidget):
         item_layout = self.item_layout_list[book["bookId"]]
         # 获取进度条
         bar = item_layout['bar']
+
+        del_btn = item_layout['del_btn']
         # 获取暂停按钮
         pause_btn = item_layout['pause_btn']
         # 获取导出按钮
@@ -666,7 +872,9 @@ class DownloadPageWidget(QWidget):
             self._update_bar_status(bar, 1)
 
             export_btn.setEnabled(True)
+            del_btn.setEnabled(True)
             pause_btn.setEnabled(False)
+
 
         elif status == 0:
             bar.setValue(offset)
@@ -717,10 +925,11 @@ class DownloadPageWidget(QWidget):
             self.show_favorite_message(f'添加到下载队列')
             self.books.append(book)
             self.book_ids.add(book['bookId'])
-
             set_book_is_download(self.books)
             self._save_to_json()
-            self._add_item(book, len(self.books))
+
+            if self.is_init:
+                self._add_item(book, len(self.books))
 
         else:
             self.show_favorite_message(f'❌ 已添加过')
@@ -728,6 +937,66 @@ class DownloadPageWidget(QWidget):
     def show_favorite_message(self, msg):
         self.toast.setText(msg)
         self.toast.show_notification(duration_ms=1500)
+
+
+    def _del_book(self, book, item):
+
+        # 创建自定义 QMessageBox
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("提示")
+        msg_box.setText(f"确定删除《{book['title']}》吗？")
+        msg_box.setIcon(QMessageBox.Warning)
+
+        # 添加按钮
+        yes_btn = msg_box.addButton("是", QMessageBox.YesRole)
+        no_btn = msg_box.addButton("取消", QMessageBox.NoRole)
+
+        # 设置红色样式
+        yes_btn.setStyleSheet("background-color: red; color: white;")
+
+        # 显示对话框并等待用户选择
+        msg_box.exec()
+
+        if msg_box.clickedButton() == no_btn:
+            # self.log_area.appendPlainText("取消任务...")
+            return
+
+        book_id = book['bookId']
+
+        self.books = [b for b in self.books if book_id != b['bookId']]
+
+        # 1. 如果直接传了item，直接删除
+        if item:
+            # 找到item的行号并删除
+            row = self.list_widget.row(item)
+            if row >= 0:
+                self.list_widget.takeItem(row)
+
+        self.book_ids.remove(book_id)
+
+        # 4. 更新统计项（重新生成统计文本）
+        self._update_book_count()
+
+        book_path = BOOK_DIR / Path(f'{book_id}')
+        if book_path.exists():
+            shutil.rmtree(book_path)
+
+        self._save_to_json()
+
+    def _update_book_count(self):
+        """更新书架顶部的统计项"""
+        # 先删除原统计项（第一行）
+        if self.list_widget.count() > 0:
+            first_item = self.list_widget.item(0)
+            if first_item and "下载队列" in first_item.text():
+                self.list_widget.takeItem(0)
+
+        # 重新添加统计项
+        book_count = len(self.book_ids)
+        if book_count == 0:
+            self.list_widget.insertItem(0, "下载队列为空")
+        else:
+            self.list_widget.insertItem(0, f"下载队列 {book_count} 本书籍。")
 
     def _save_to_json(self):
         open(LOCAL_BOOK_SHELF_PATH, 'w', encoding='utf8').write(json.dumps(self.books, ensure_ascii=False, indent=4))
@@ -745,7 +1014,7 @@ class DownloadPageWidget(QWidget):
             self.tasks.clear()
 
         # 添加总数提示
-        self.list_widget.addItem(f"下载列队 {len(book_list)} 本书籍。")
+        self.list_widget.addItem(f"下载队列 {len(book_list)} 本书籍。")
 
         for number, book in enumerate(book_list):
             self._add_item(book, number)
@@ -753,25 +1022,40 @@ class DownloadPageWidget(QWidget):
     def _add_item(self, book, number):
         book_id = book["bookId"]
         self.book_ids.add(book_id)
-        pix = load_image(book=book)
+
         item = QListWidgetItem()
         item_widget = QWidget()
         item_layout = QVBoxLayout(item_widget)
+
         # 上排 = 图片 + 标题 + 按钮区
-        img_label = QLabel()
-        img_label.setPixmap(pix)
+        # pix = load_image(book=book)
+        # img_label = QLabel()
+        # img_label.setPixmap(pix)
+
+        # --- 封面占位 ---
+        cover_label = QLabel()
+        cover_label.setFixedSize(40, 60)
+        cover_label.setPixmap(QPixmap(40, 60))  # 占位空图
+        # item_layout.addWidget(cover_label)
+
         title_label = QLabel(book["title"])
         title_label.setWordWrap(True)
         title_label.setStyleSheet("font-size: 14px; font-weight: bold;")
 
-        pause_btn = QPushButton("暂停")
+        del_btn = BootstrapButton('', icon_path='icons/trash.svg', variant='danger', outline=True)
+        del_btn.setMaximumWidth(40)
+        del_btn.clicked.connect(lambda c, b=book, i=item: self._del_book(b, i))
+
+        # 暂停、继续
+        pause_btn = BootstrapButton('', icon_path='icons/pause.svg', variant='warning', outline=True)
         pause_btn.setEnabled(False)
-        pause_btn.setMaximumWidth(50)
+        pause_btn.setMaximumWidth(40)
         pause_btn.clicked.connect(lambda btn=pause_btn: self.toggle_pause(pause_btn))
 
-        export_btn = QPushButton("导出")
+
+        export_btn = BootstrapButton('', icon_path='icons/download.svg', outline=True)
         export_btn.setEnabled(False)
-        export_btn.setMaximumWidth(50)
+        export_btn.setMaximumWidth(40)
         # 点击导出 → 弹 dialog
         export_btn.clicked.connect(lambda b, bid=book["bookId"]: self.open_export_dialog(bid))
 
@@ -810,95 +1094,81 @@ class DownloadPageWidget(QWidget):
                 status_label.setStyleSheet("color: orange; font-size: 12px;")
 
                 pause_btn.setEnabled(True)
-                pause_btn.setText('继续')
+                pause_btn.toggle_icon('icons/play.svg')
 
-                # self.update_progress(book,)
+                del_btn.setEnabled(False)
             else:
                 progress.setVisible(False)
 
         # 上排 = 图片 + 标题 + 按钮区
         row = QHBoxLayout()
-        img_label = QLabel()
-        img_label.setPixmap(pix)
+        # img_label = QLabel()
+        # img_label.setPixmap(pix)
+
         title_label = QLabel(book["title"])
         title_label.setWordWrap(True)
         # 按钮竖排布局
         btn_column = QHBoxLayout()
-        # btn_column.addWidget(open_btn)
-        # btn_column.addWidget(download_btn)
+        btn_column.addWidget(del_btn)
         btn_column.addWidget(pause_btn)
         btn_column.addWidget(export_btn)
         btn_column.addStretch()
 
-        number_label = QLabel(f'{number + 1}. ')
-        row.addWidget(number_label, 0)
-        row.addWidget(img_label, 0)
-        row.addWidget(title_label, 10)
-        # 把按钮竖排添加进去
-        row.addLayout(btn_column, 0)
+        # 状态进度
         status_row = QHBoxLayout()
         status_row.addWidget(status_label, 0)
         status_row.addWidget(progress, 10)
+
+        number_label = QLabel(f'{number + 1}. ')
+        row.addWidget(number_label, 0)
+        row.addWidget(cover_label, 0)
+        row.addWidget(title_label, 7)
+        row.addLayout(status_row, 3)
+        # 把按钮竖排添加进去
+        row.addLayout(btn_column, 0)
+
+
         item_layout.addLayout(row)
-        item_layout.addLayout(status_row)
+        # item_layout.addLayout(status_row)
         item.setSizeHint(item_widget.sizeHint())
         self.list_widget.addItem(item)
         self.list_widget.setItemWidget(item, item_widget)
 
         self.item_layout_list[book_id] = {
-            'bar': progress, 'pause_btn': pause_btn, 'export_btn': export_btn, 'status_label': status_label
+            'del_btn': del_btn,
+            'pause_btn': pause_btn,
+            'export_btn': export_btn,
+            'bar': progress,
+            'status_label': status_label
         }
         self.worker.add_task(book)
 
-    def bind_download(self, download_btn, pause_btn, export_btn, pbar, slabel, book, invoke=True):
+        # --- 异步加载封面 ---
+        if book.get('cover'):
+            if book['cover'] in self.pixmap_cache:
+                cover_label.setPixmap(self.pixmap_cache[book['cover']])
+            else:
+                task = ImageLoadTask(book, (40, 60),
+                                     lambda pix, b: self._on_image_loaded(pix, b, cover_label))
+                self.thread_pool.start(task)
 
-        def start_download():
-            download_btn.setEnabled(False)
-            pbar.setVisible(True)
-            pause_btn.setEnabled(True)
-
-            worker = AsyncDownloadWorker(book, )
-            if invoke:
-                # 🚀 创建真正的异步下载任务
-                worker.start()
-                worker.paused = True
-
-            self.tasks.update({
-                book['bookId']: worker
-            })
-
-            # 暂停按钮
-            pause_btn.clicked.connect(lambda: self.toggle_pause(worker, pause_btn))
-
-            # 状态文本（用于 开始下载 / 完成 / 暂停 / 失败）
-            def on_done(success):
-                download_btn.setEnabled(True)
-                pause_btn.setEnabled(False)
-                if success:
-                    export_btn.setEnabled(True)
-
-            # 设置总章节数
-            worker.chapterTotal.connect(pbar.setRange)
-
-            # 设置当前进度
-            worker.progress.connect(
-                lambda status, msg, curr, total, :
-                self.update_progress(download_btn, pause_btn, export_btn, pbar, slabel, status, msg, curr, total)
-            )
-            worker.show_progress.connect(pbar.setValue)
-
-            worker.update_book_signal.connect(self.update_books)
-
-        return start_download
+    @Slot(QPixmap, object, QLabel)
+    def _on_image_loaded(self, pixmap, book, label):
+        if pixmap and not pixmap.isNull():
+            print(f'{book["title"]} - {book["cover"]}')
+            label.setPixmap(pixmap)
+            self.pixmap_cache[book['cover']] = pixmap
 
     def toggle_pause(self, pause_btn,):
 
         if not self.worker.paused:
             # 暂停
             self.worker.pause()
-            pause_btn.setText("继续")
+            # pause_btn.setText("继续")
+            pause_btn.toggle_icon('icons/play.svg')
         else:
-            pause_btn.setText("暂停")
+            # pause_btn.setText("暂停")
+            pause_btn.toggle_icon('icons/pause.svg')
             # 继续
             self.worker.resume()
 
@@ -917,16 +1187,19 @@ class DownloadPageWidget(QWidget):
 # =========================================
 class WeReadWindow(QMainWindow):
 
+    fav_signal = Signal()
+    bookshelf_signal = Signal()
+    download_signal = Signal()
+
     def __init__(self, user_data):
         super().__init__()
         self.user_data = user_data
         self.book_util = WereadGenerate()
-        # self.book_list = book_list
         self.tasks = {}
         self.loading_dialog = None
 
         self.setWindowTitle("WeRead 书架-试用版 - beat")
-        self.resize(800, 800)
+        self.resize(1000, 800)
 
         # ----------------------------------
         # 1. 创建菜单栏
@@ -959,17 +1232,17 @@ class WeReadWindow(QMainWindow):
         self.stacked_widget.addWidget(self.search_page)
 
         # 我的书架
-        bookshelf_page = BookshelfPageWidget()
-        self.stacked_widget.addWidget(bookshelf_page)  # Index 2
+        self.bookshelf_page = BookshelfPageWidget(weread=self)
+        self.stacked_widget.addWidget(self.bookshelf_page)  # Index 2
 
-        self.favorite_page = FavoriteBookPageWidget()
+        self.favorite_page = FavoriteBookPageWidget(weread=self)
         self.stacked_widget.addWidget(self.favorite_page)  # Index 3
 
         # 下载列表页面 (Index 1) -> 使用独立类
-        self.download_page = DownloadPageWidget()
+        self.download_page = DownloadPageWidget(weread=self)
         self.stacked_widget.addWidget(self.download_page)
 
-        bookshelf_page.download_requested.connect(self.download_page.add_book)
+        self.bookshelf_page.download_requested.connect(self.download_page.add_book)
         self.favorite_page.download_requested.connect(self.download_page.add_book)
 
         # 4. 初始化和连接导航
@@ -1033,8 +1306,9 @@ class WeReadWindow(QMainWindow):
         # --- 用户信息区域 ---
         user_box = QHBoxLayout()
         avatar = load_image(self.user_data.get("avatar", ''), size=(40, 40))
-        avatar_label = QLabel()
+        avatar_label = ClickableLabel('我的书架')
         avatar_label.setPixmap(avatar)
+        avatar_label.clicked.connect(lambda : webbrowser.open("https://weread.qq.com/web/shelf"))
 
         info_label = QLabel(
             f"<b>{self.user_data.get('name', 'N/A')}</b><br>"
@@ -1059,6 +1333,8 @@ class WeReadWindow(QMainWindow):
 
         self.nav_list.setCurrentRow(0)
 
+        self.nav_list.itemClicked.connect(self._handle_item_clicked)
+
         nav_layout.addWidget(self.nav_list)
         nav_layout.addStretch()
 
@@ -1069,8 +1345,15 @@ class WeReadWindow(QMainWindow):
         self.nav_list.currentRowChanged.connect(self.stacked_widget.setCurrentIndex)
 
     def handle_global_favorite(self, book):
-        print(book)
         self.favorite_page.add_book(book)
+
+    def _handle_item_clicked(self, item: "QListWidgetItem"):
+        if '我的书架' in item.text():
+            self.bookshelf_signal.emit()
+        if '本地收藏' in item.text():
+            self.fav_signal.emit()
+        if '下载列表' in item.text():
+            self.download_signal.emit()
 
     def show_login_info(self):
         """显示登录信息的槽函数"""
@@ -1116,7 +1399,7 @@ class WeReadWindow(QMainWindow):
         # 2. 创建并启动异步工作线程
         self.async_worker = LoginAsyncWorker()
         self.async_worker.finished.connect(self.on_refresh_finished)
-        self.async_worker.books_signal.connect(self.display_books)
+        self.async_worker.books_signal.connect(self.bookshelf_page.update_books)
         self.async_worker.start()
 
     def on_refresh_finished(self):
@@ -1155,21 +1438,22 @@ def weread_main():
     print("starting login...")
 
     window = None
-    user_data = asyncio.run(login_weread())  # 如果需要
-
-    user_data = load_user_info()
 
     def start_app(r):
         nonlocal window
         print('start app..')
         if r:
+            user_data = load_user_info()
             window = WeReadWindow(user_data, )
             window.show()
         else:
             QMessageBox.warning(None, "完成", "数据加载失败！关闭程序。")
 
+    is_init = True  # 是否打开登录页面登录
+    # is_init = False
+
     # 实例化主窗口，加载过程会自动开始
-    main_window = DataLoadWindow([])
+    main_window = DataLoadWindow(is_init)
 
     main_window.loaded_signal.connect(start_app)
 

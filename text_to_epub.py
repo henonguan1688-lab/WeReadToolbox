@@ -532,8 +532,12 @@ class PdfBuilder(BuilderThread):
                 fixed_html = soup.prettify()
 
             chapter['content'] = fixed_html
+        try:
+            self.output()
+        except Exception as e:
+            traceback.print_exc()
 
-        self.output()
+            self.send(f'下载失败：{e}')
 
         self.end_signal.emit(0)
 
@@ -625,13 +629,18 @@ class PdfBuilder(BuilderThread):
             "User-Agent": "Mozilla/5.0",
             "Referer": "https://weread.qq.com/"
         }
+        while True:
+            try:
+                r = requests.get(url, headers=headers, timeout=10)
+                if r.status_code == 200:
+                    img_path.write_bytes(r.content)
+                    break
+                else:
+                    self.send(f"下载失败：{url}  {r.status_code}  ",)
 
-        r = requests.get(url, headers=headers, timeout=10)
-        if r.status_code == 200:
-            img_path.write_bytes(r.content)
-        else:
-            self.send(f"下载失败：{url}  {r.status_code}  ",)
-
+            except:
+                traceback.print_exc()
+                self.send(f"下载失败-重试：{url}",)
 
 def process_xhtml(xhtml: str):
     soup = BeautifulSoup(xhtml, "lxml-xml")

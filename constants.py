@@ -1,9 +1,13 @@
 import os
+import sys
 from pathlib import Path
 
 LIB_DIR = Path('lib')
 
+
 CHROME_DIR = LIB_DIR / Path(r'chromium-1200/chrome-win64/chrome.exe')
+
+
 WKHTMLTOPDF_DIR = LIB_DIR / Path(r'wkhtmltox/bin/wkhtmltopdf.exe')
 
 STORAGE = "weread_state.json"
